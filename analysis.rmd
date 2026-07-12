@@ -1,0 +1,227 @@
+---
+title: "Exploratory metabolomic/longitudinal analysis of white tea"
+author: "Josh Morimoto"
+date: "July 11, 2026"
+output: html_fragment
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
+```
+
+# Exploratory metabolomic/longitudinal analysis of white tea
+Tea is an important subject for me because it was the model crop on which my
+PhD thesis was based. At Tufts, we harvested tea grown in different seasons and
+elevations to see how its environment changed its flavor and health properties,
+all driven by its metabolism. Like many plants, tea uses chemical signals to
+communicate with its environment, since it can't get up and walk away like an
+animal or even a microbe could. Evolution has driven myriad metabolic pathways
+to allow plants to defend themselves. This makes them particularly complex and
+challenging subjects of research, slowing studies on how crop qualities will
+change with the increasing threat of climate change.
+
+For this demo/tutorial, I looked for data collected from _Camellia sinensis_
+samples on MetaboLights and found one study in progress by Wei and Li
+(https://www.ebi.ac.uk/metabolights/editor/MTBLS13336/overview).  This study
+aimed to investigate the sensory and chemical metabolites, both endogenous to
+the tea and exogenous from microbial contributions, over long-term storage. We
+will focus on the metabolomics data herein.
+
+## IDE considerations
+I use VSCode with R and arf as the R frontend. Many people use RStudio or Python
+with marimo or Jupyter notebooks but this is what works best for me. I also
+manage R/Python environments with conda. For more info, follow Renkun Ken's blog
+on writing R in VScode:
+https://renkun.me/2019/12/11/writing-r-in-vscode-a-fresh-start/. He's my hero.
+
+You'll also notice I don't really stick to the R style guidelines. I like my
+`=` signs more than typing out `<-` everytime because I learned on Python.
+It has never not worked for me. Conversely, I also like naming variables with
+`.` rather than snake_case or camelCase. It looks better to my eyeballs.
+
+## Libraries
+```{r}
+library(Spectra)
+library(MsBackendMetaboLights)
+library(purrr)
+library(stringr)
+library(dplyr)
+library(curl)
+library(LCMStools)
+library(MsExperiment)
+library(BiocParallel)
+
+if(.Platform$OS == 'Windows'){
+  register(bpstart(SnowParam(6, progressbar=FALSE)))
+} else if(.Platform$OS == 'unix'){
+  register(bpstart(MulticoreParam(6, progressbar=FALSE)))
+}
+```
+
+For `httpgd` with VSCode and arf
+
+```{r, eval=FALSE}
+library(httpgd)
+hgd()
+hgd_browse()
+```
+
+## Loading the study data
+First we load the study information from the MetaboLights repository using the
+MTBLS ID. This is my first time personally using MetaboLights, so I'm getting a
+view on how the data is organized.
+
+```{r}
+mtbls.repo = 'MTBLS13336'
+all.files = mtbls_list_files(mtbls.repo)
+all.files
+```
+
+Raw data is stored under *FILES* and study metadata in various formats in the
+root directory.
+
+Below is the assay information table, also accessible online at
+https://www.ebi.ac.uk/metabolights/editor/MTBLS13336/assays.  This contains
+sample names, data file names, and some experimental parameters.  If the data
+were converted, we would also see a different file under the *Derived Spectral
+Data File* column, but the authors kept them in Thermo's proprietary .raw
+format. Otherwise, using the `Spectra` package and the `MsBackendMetaboLights`
+backend, we could have loaded the *.mzML* files directly for analysis.
+
+```{r}
+study.info = read.table(paste0(mtbls_ftp_path(mtbls.repo), grep('^a_', all.files, value = TRUE)),
+    sep = '\t', header = TRUE, check.names = FALSE)
+study.info |> head()
+study.info[, c('Raw Spectral Data File', 'Derived Spectral Data File')] |> head()
+#specs = Spectra::Spectra('MTBLS13336', filePattern = '.raw', source = MsBackendMetaboLights())
+```
+
+Instead, we'll download the raw data and convert herein. This will take a while,
+as high resolution mass spec data can be several gigabytes per file, so if
+you're playing along at home, you can execute this block and go get a coffee.
+In this case, they're ~80 MB per file. I've never worked with Orbitrap data so
+that's pretty neat compared to Q-TOF profile data.
+
+Note that I had to replace the `FILES/` prefix from the repo because I don't
+need that in my local copy.
+
+I thought parallelizing this with walk would make it go fast but it does not.
+Probably faster to download a zip and unzip it locally.
+
+```{r, eval=FALSE, progress=FALSE}
+paste0(mtbls_ftp_path(mtbls.repo), mtbls.repo, '.zip')
+dir.create('_raw', showWarnings=FALSE)
+download.file(
+  url = paste0(mtbls_ftp_path(mtbls.repo), mtbls.repo, '.zip'),
+  destfile = paste0(mtbls.repo, '.zip')
+)
+```
+
+That didn't work. MetaboLights doesn't zip raw data in this repo.
+The `curl` package has a function `multi_download` that might work faster.
+
+```{r, eval=FALSE, progress=FALSE}
+dir.create('_raw', showWarnings=FALSE)
+
+response.table = curl::multi_download(
+  urls = paste0(
+    mtbls_ftp_path(mtbls.repo), 
+    study.info[, 'Raw Spectral Data File']), 
+  destfiles = paste0(
+    './_raw/',
+    stringr::str_replace(study.info[, 'Raw Spectral Data File'], 'FILES/', '')),
+  resume = TRUE
+)
+
+response.table[,'error'] |> head()
+response.table$destfile |> head()
+dir('_raw') |> head()
+```
+
+This didn't work either due to timeouts with the ftp server. In the end,
+downloading the files sequentially with `download_file` was most reliable.
+
+```{r}
+dir.create('_raw', showWarnings=FALSE)
+if(length(study.info[, 'Raw Spectral Data File']) != length(dir('_raw'))){
+  walk(study.info[, 'Raw Spectral Data File'], ~ download.file(
+    url = paste0(mtbls_ftp_path(mtbls.repo), .x),
+    destfile = paste0('_raw/', stringr::str_replace(.x, 'FILES/', ''))),
+    method = 'libcurl'
+  )
+}
+```
+
+## Data conversion
+To read files with `xcms`, data need to be converted to *.mzML*
+format with `MSConvert` from the `ProteoWizard` package. Since I'm on Linux,
+I need a docker container to run this with a Windows image. On Windows, it can
+run natively. The code below detects the host environment and chooses the appropriate
+conversion command. The `convertDtoMZML` function from my `LCMStools` package
+only works for Agilent *.d* files. Docker will prompt for a password for sudo
+access. By using the Docker image, you agree to certain vendor licenses for
+converting proprietary formats to *.mzML*.
+
+```{r}
+raw.files = dir('_raw', pattern = '\\.raw$', full.names = TRUE)
+
+# Check if length mzML files matches length raw files
+if(length(raw.files) > length(dir('_mzML', pattern = '\\.mzML$'))){
+  if(.Platform$OS == 'Windows'){
+    d.files |> walk(convertDtoMZML, path.out = '_mzML')
+  } else if(.Platform$OS == 'unix'){
+    walk(raw.files, ~ system(paste0(
+      'sudo docker run -it --rm -v $PWD:/data proteowizard/pwiz-skyline-i-agree-to-the-vendor-licenses:latest wine msconvert /data/_raw/', basename(.), ' --filter "peakPicking true 1-" -o /data/_mzML --mzML'
+      )
+    ))
+  }
+}
+
+mzml.files = dir('_mzML', pattern = '\\.mzML$', full.names = TRUE)
+```
+
+## Initial data inspection
+First we'll plot the positive and negative TICs to make sure there aren't any
+misbehaving data files or sample runs.
+
+```{r}
+mzml.files |> head()
+pos.files = mzml.files[str_detect(mzml.files, 'POS')]
+pos.files
+neg.files = mzml.files[str_detect(mzml.files, 'NEG')]
+pos.data = readMsExperiment(pos.files)
+neg.data = readMsExperiment(neg.files)
+
+plot(chromatogram(pos.data), main = 'Positive TIC')
+
+plot(chromatogram(neg.data), main = 'Negative TIC')
+```
+
+It looks like nothing disastrous happened in the data collection. From the TICs,
+it's hard to tell right away if there are any difference since the noise buries
+most of the valuable data. Sometimes you can get away with focusing on a certain
+region that's obviously different.
+
+Looking closer, the polar region before 100 seconds in retention changes with
+intensity in both the positive and negative ionization modes. In the next part,
+we'll color code these TICs and actually do some peak picking on the _m/z_
+level.
+
+## Stay tuned for Part 2.
+<!--
+## Supplying readMsExperiment with metadata
+Now that we've taken a first look at the data, I'm going to go back and supply
+the `readMsExperiment` function with the relevant sampleData information so we
+can use it downstream for peak grouping and statistical analyses. The original
+MsExperiment objects will be replaced so they don't take up more memory.
+
+Coneveniently, we can build out sampleData from the assay data from MetaboLights.
+```{r}
+
+```
+-->
+_Raw LC-MS data used in this post is from the MetaboLights study MTBLS13336 Shu
+Ya Wei and Long Wen Li, available under [CC0 1.0
+Universal](https://creativecommons.org/publicdomain/zero/1.0/) at 
+https://www.ebi.ac.uk/metabolights/MTBLS13336. MetaboLights: Yurekten et al.,
+2023._

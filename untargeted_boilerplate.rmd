@@ -1,0 +1,361 @@
+### TODO
+[ ] - function to normalize to internal standard
+[ ] - automatically export plots to plots folder
+[x] - Get sample metadata from d files or mzml files
+  - needs to be d files, mzml doesn't capture data like method, name, location
+[ ] - Fix plots cutting off x-axis label and title
+[x] - Fix colors in peakBg of plots, not mapping to sample time
+[x] - Function that makes mz/rt feature name from feature number
+[ ] - make testPeak function facet
+[ ] - make multicore param based on platform os
+[ ] - make parseSampleInfo take .d files instead of the xml files
+
+## Libraries
+```{r}
+library(LCMStools)
+library(purrr)
+library(MsExperiment)
+library(xcms)
+library(dplyr)
+library(readr)
+library(colorspace)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+library(scales)
+library(SummarizedExperiment)
+library(ropls)
+
+if(.Platform$OS == 'Windows'){
+  register(bpstart(SnowParam(6)))
+} else if(.Platform$OS == 'unix'){
+  register(bpstart(MulticoreParam(6)))
+}
+```
+## Functions
+```{r}
+plotFeature = function(ft, peaks.obj, groupFc, paletteVc, rtWindow = 30) {
+  ppm = processParam(processHistory(peaks.obj)[[1]])@ppm
+  ft.def = featureDefinitions(peaks.obj)[ft, c('mzmed', 'rtmed')]
+  mzr = calcPPM(ft.def$mzmed, ppm)
+  rtr = c(ft.def$rtmed + c(-rtWindow, rtWindow))
+
+  # groupFc = c(rep('untreated', 3), rep('treated', 3))
+  # paletteVc = c("#1b9e77", "#d95f02")
+#  names(paletteVc) = unique(groupFc)
+
+  plot(chromatogram(peaks.obj, mz = c(mzr[1], mzr[2]), rt = c(rtr[1], rtr[2])),
+    col = paletteVc[groupFc],
+    peakBg = paste0(paletteVc[groupFc[chromPeaks(
+      peaks.obj |> filterRt(c(rtr[1], rtr[2])) |> filterMz(c(mzr[1], mzr[2]))
+    )[,'sample']]], as.character(90/length(peaks.obj))))
+}
+
+testPeak = function(peaks.obj, peakMz, peakRt, rtWindow = 30) {
+  sample.group = str_extract(sampleData(peaks.obj)$name, '^[a-z]+')
+  print(sample.group)
+  sample.colors = qualitative_hcl(length(unique(sample.group)), palette = 'Dark 3')
+  names(sample.colors) = unique(sample.group)
+  peak.mzr = calcPPM(peakMz, processParam(processHistory(peaks.obj)[[1]])@ppm)
+  chromPeaks(peaks.obj, mz = c(peak.mzr[1], peak.mzr[2]), rt = peakRt + c(-rtWindow, rtWindow))
+  # XIC plot
+  peaks.obj |> 
+    filterRt(peakRt + c(-rtWindow, rtWindow)) |>
+    filterMz(c(peak.mzr[1], peak.mzr[2])) |> 
+    plot(type='XIC')
+  par(mfrow=c(1,1))
+  plot(chromatogram(peaks.obj, mz = c(peak.mzr[1], peak.mzr[2]),
+    rt = peakRt + c(-rtWindow, rtWindow)),
+    col = sample.colors[sample.group],
+    #peakBg = paste0(sample.colors[sample.group[chrom.sample]], '30'))
+    peakBg = paste0(sample.colors[sample.group[chromPeaks(
+      peaks.obj |> filterRt(peakRt + c(-rtWindow, rtWindow)) |>
+      filterMz(c(peak.mzr[1], peak.mzr[2]))
+      )[, 'sample']]], as.character(90/length(peaks.obj))))
+}
+```
+## Conversion
+```{r}
+d.files = dir('_d', pattern = '\\.d$', full.names = TRUE)
+
+# Check if length mzML files matches length d files
+if(length(d.files) > length(dir('_mzML', pattern = '\\.mzML$'))){
+  if(.Platform$OS == 'Windows'){
+    d.files |> walk(convertDtoMZML, path.out = '_mzML')
+  } else if(.Platform$OS == 'unix'){
+    walk(d.files, ~ system(paste0(
+      'sudo docker run -it --rm -v $PWD:/data proteowizard/pwiz-skyline-i-agree-to-the-vendor-licenses:latest wine msconvert /data/_d/', basename(.), ' --filter "peakPicking true 1-" -o /data/_mzML --mzML'
+      )
+    ))
+  }
+}
+
+mzml.files = dir('_mzML', pattern = '\\.mzML$', full.names = TRUE)
+```
+## Metadata
+```{r}
+xml.files = dir('_d', pattern = 'AcqData\\/sample\\_info\\.xml$', full.names = TRUE)
+xml.files = map(d.files, ~ file.path(., 'AcqData/sample_info.xml')) |> unlist()
+sample.data = map_dfr(xml.files, parseSampleInfo)
+sample.data |> colnames()
+sample.data = sample.data |>
+  dplyr::rename(
+    name = `Sample Name`) |> 
+  mutate(
+    mode = case_when(
+      str_detect(Method, 'neg') ~ 'neg',
+      .default = 'pos'
+    )
+  )
+#sample.data |> head()
+```
+## Load files
+```{r}
+exp.data = readMsExperiment(mzml.files, sampleData = sample.data)
+data.pos = atomic.data |>
+  filterFile(which(str_detect(sampleData(exp.data)$mode, 'pos')))
+data.neg = atomic.data |>
+  filterFile(which(str_detect(sampleData(exp.data)$mode, 'neg')))
+```
+## Groups colors
+```{r}
+sampleData(atomic.data.pos)$name
+groupFc.pos = c(
+  'untreated', 
+  'treated', 
+  'untreated',
+  'untreated',
+  'treated',
+  'treated'
+)
+sampleData(atomic.data.neg)$name
+groupFc.neg = c(
+  'treated',
+  'treated',
+  'untreated',
+  'treated',
+  'untreated',
+  'untreated'
+)
+
+sample.colors = qualitative_hcl(2, 'Dark 3')
+names(sample.colors) = unique(groupFc.pos)
+paletteVc.pos = sample.colors[groupFc.pos]
+paletteVc.neg = sample.colors[groupFc.neg]
+```
+## TIC check
+```{r}
+par(mfrow=c(2,1))
+plot(chromatogram(atomic.data.pos), main = 'positive mode')
+plot(chromatogram(atomic.data.neg), main = 'negative mode')
+```
+## Peak finding
+```{r}
+cwp = CentWaveParam(
+  ppm = 80,
+  peakwidth = c(3, 10),
+  prefilter = c(3, 5000),
+  mzCenterFun = 'wMean',
+  integrate = 2L,
+  mzdiff = 0.01,
+  noise = 10000
+)
+
+peaks.pos = findChromPeaks(atomic.data.pos |> filterRt(c(20, 350)), param = cwp)
+peaks.neg = findChromPeaks(atomic.data.neg |> filterRt(c(20, 350)), param = cwp)
+
+pdp.pos = PeakDensityParam(sampleGroups = groupFc.pos, minFraction = 0.6, bw = 1)
+pdp.neg = PeakDensityParam(sampleGroups = groupFc.neg, minFraction = 0.6, bw = 1)
+caffeine.mz = calcPPM(195.1, 100)
+caffeine.chrom = chromatogram(peaks.pos, mz = caffeine.mz)
+plotChromPeakDensity(caffeine.chrom, col = paletteVc.pos, param = pdp.pos,
+#  peakBg = sample.colors[chromPeaks(caffeine.chrom)[,'sample']] |> paste0('30'),
+  peakCol = paletteVc.pos[chromPeaks(caffeine.chrom)[,'sample']],
+  peakPch = 16)
+
+peaks.pos.grouped = groupChromPeaks(peaks.pos, pdp.pos)
+peaks.pos.grouped.filled = fillChromPeaks(peaks.pos.grouped, param = ChromPeakAreaParam())
+## Refactored positive results differ from original results for some reason
+### Old pdp param
+#Object of class:  PeakDensityParam 
+# Parameters:
+# - sampleGroups: [1] "pos" "pos" "pos" "pos" "pos" "pos"
+# - bw: [1] 1
+# - minFraction: [1] 0.2
+# - minSamples: [1] 1
+# - binSize: [1] 0.25
+# - maxFeatures: [1] 50
+# - ppm: [1] 0
+## New one
+peaks.pos.grouped@processHistory[[2]] |> processParam()
+#Object of class:  PeakDensityParam 
+# Parameters:
+# - sampleGroups: [1] "untreated" "treated"   "untreated" "untreated" "treated"   "treated"  
+# - bw: [1] 1
+# - minFraction: [1] 0.6
+# - minSamples: [1] 1
+# - binSize: [1] 0.25
+# - maxFeatures: [1] 50
+# - ppm: [1] 0
+### Old one had wrong sampleGroups Fc, so may have missed unique compounds
+peaks.neg.grouped = groupChromPeaks(peaks.neg, pdp.neg)
+peaks.neg.grouped.filled = fillChromPeaks(peaks.neg.grouped, param = ChromPeakAreaParam())
+```
+## Results and PCA
+```{r}
+pos.results = quantify(peaks.pos.grouped.filled, value = 'into', method = 'sum')
+neg.results = quantify(peaks.neg.grouped.filled, value = 'into', method = 'sum')
+
+pca.pos = opls(assay(pos.results, 'raw') |> t(), crossvalI = 3, predI = 3)
+pca.neg = opls(assay(neg.results, 'raw') |> t(), crossvalI = 3, predI = 3)
+# Don't know why this was throwing an error on laptop
+
+plot(pca.pos, parPaletteVc = sample.colors, parAsColFcVn = groupFc.pos)
+plot(pca.neg, parAsColFcVn = groupFc.neg, parPaletteVc = sample.colors)
+
+#opls.pos = opls(assay(pos.results, 'raw') |> t(), y = groupFc.pos, predI=3,crossvalI = 3, orthoI=NA)
+#opls looks overfitted
+```
+## Plotting important things from PCA
+```{r}
+getLoadingMN(pca.pos) |> as.data.frame() |> arrange(p1) |> dplyr::slice(1:9)
+getLoadingMN(pca.pos) |> as.data.frame() |> arrange(desc(p1)) |> dplyr::slice(1:9)
+
+getLoadingMN(pca.neg) |> as.data.frame() |> arrange(p1) |> dplyr::slice(1:9)
+getLoadingMN(pca.neg) |> as.data.frame() |> arrange(desc(p1)) |> dplyr::slice(1:9)
+
+pos.pos.features = getLoadingMN(pca.pos) |> 
+  as.data.frame() |> 
+  arrange(desc(p1)) |> 
+  dplyr::slice(1:9) |> 
+  rownames()
+pos.neg.features = getLoadingMN(pca.pos) |> 
+  as.data.frame() |> 
+  arrange(p1) |> 
+  dplyr::slice(1:9) |> 
+  rownames()
+
+neg.pos.features = getLoadingMN(pca.neg) |>
+  as.data.frame() |>
+  arrange(desc(p1)) |>
+  dplyr::slice(1:9) |>
+  rownames()
+
+neg.neg.features = getLoadingMN(pca.neg) |>
+  as.data.frame() |>
+  arrange(p1) |>
+  dplyr::slice(1:9) |>
+  rownames()
+
+par(mfrow=c(3,3))
+walk(c(pos.pos.features, pos.neg.features),
+  ~ {
+    plotFeature(., peaks.pos.grouped.filled, groupFc = groupFc.pos,
+    paletteVc = sample.colors)
+  })
+par(mfrow=c(3,3))
+walk(c(neg.pos.features, neg.neg.features),
+  ~ {
+    plotFeature(., peaks.neg.grouped.filled, groupFc = groupFc.neg,
+    paletteVc = sample.colors)
+  })
+
+# Debugging stuff. Remove after refactor
+#groupFc.pos
+#paletteVc.pos
+#
+#groupFc.neg
+#paletteVc.neg
+#paletteVc.neg[groupFc.neg]
+par(mfrow=c(1,1))
+plotFeature(
+  neg.neg.features[8], 
+  peaks.neg.grouped.filled, 
+  groupFc = groupFc.neg, 
+  paletteVc = paletteVc.neg)
+featureDefinitions(peaks.neg.grouped.filled)[neg.neg.features[8],]
+featureValues(peaks.neg.grouped.filled)[neg.neg.features[8],]
+
+sampleData(peaks.neg.grouped.filled)$name
+walk(sampleData(peaks.neg.grouped.filled)$name, ~ {
+  plot(chromatogram())
+})
+
+chromPeaks(peaks.neg.grouped.filled |> 
+  filterRt(c(
+    featureDefinitions(peaks.neg.grouped.filled)['FT562','rtmed']-30,
+    featureDefinitions(peaks.neg.grouped.filled)['FT562','rtmed']+30)) |>
+  filterMz(c(
+    calcPPM(featureDefinitions(peaks.neg.grouped.filled)['FT562','mzmed'], 80)[1],
+    calcPPM(featureDefinitions(peaks.neg.grouped.filled)['FT562','mzmed'], 80)[2]
+  ))
+  )
+
+
+names(sample.colors)
+unique(groupFc.pos)
+unique(groupFc.neg)
+
+groupFc.neg
+```
+## Reading Benjamin's data
+```{r}
+ben.data = read_xlsx('Unpasteurized vs Pasteurized by Feature--Ordered P-value for Josh.xlsx')
+ben.data |> View()
+ben.data |> filter(`P-value` < 0.05) |> head()
+
+# 62 features p-value < 0.05
+```
+## Identifying important features
+```{r}
+## Need to load old results for features to match up
+old.results = readRDS('old_results_for_ben.rds')
+old.results
+##
+feature.ids = ben.data |> 
+  filter(`P-value` < 0.05) |> 
+  mutate(
+    mz = featureDefinitions(old.results)[Feature, 'mzmed'],
+    rt = featureDefinitions(old.results)[Feature, 'rtmed']
+  )
+options(digits=7)
+options(pillar.sigfig=7)
+feature.ids[1,'mz']
+
+h.mass = 1.0078250319
+na.mass = 22.98976928
+feature.masses = feature.ids |>
+  mutate(
+    monoisotopic.mass.h = mz - h.mass,
+    monoisotopic.mass.na = mz - na.mass
+  )
+feature.masses
+write_csv(feature.masses, 'feature_masses.csv')
+coffee.db = read_tsv('../phytohub_coffee.csv')
+coffee.db |> head()
+
+## Need a function that looks up the monoisotopic masses against the coffee.db
+## table
+seq_len(nrow(feature.masses))
+coffee.matches = data.frame()
+for(row in seq_len(nrow(feature.masses))){
+  feature.masses[row,'monoisotopic.mass.h'] |> pull() |>
+    calcPPM(80) -> test.mass
+  test.mass
+  coffee.matches = coffee.matches |> bind_rows(
+    coffee.db |> filter(between(`Monoisotopic mass`, test.mass[1], test.mass[2]))
+  )
+}
+coffee.matches
+## why didn't quinides show up
+feature.masses |> filter(between(mz, 333, 338))
+
+
+## Reverse lookup
+
+```
+## Identifying features based on my PCA
+```{r}
+pos.pos.features
+```
