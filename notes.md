@@ -33,3 +33,19 @@ After the machine operation was completed, the original LC-MS data was imported 
 
 ## Metabolite identification
 The differential metabolites were annotated for their metabolic pathways using the KEGG database (https://www.kegg.jp/kegg/pathway.html), and the pathways in which the differential metabolites were involved were obtained. The pathway enrichment analysis was performed using the Python software package scipy.stats, and the biological pathways most relevant to the experimental treatment were identified through Fisher's exact test.
+
+## Notes from autopilot:
+
+Some colors for plotting
+Build the viridis gradient from the actual numeric years only (NA excluded)
+so the 0 -> 11 range spans the full purple -> yellow gradient endpoints.
+If NA were included here, sequential_hcl would spend one of its 7 steps on
+QC, stealing the true yellow endpoint from year 11 instead of giving QC its
+own color.
+
+ropls::plot() internally does as.vector(parAsColFcVn) then factor(...)
+again on the result, which always re-sorts alphabetically/lexicographically
+regardless of any custom factor levels we set beforehand. Plain "11" sorts
+before "2" as a string (compares '1' < '2'), scrambling the intended 0->11
+order. Zero-padding to a fixed width makes alphabetical order equal numeric
+order, sidestepping the problem entirely.

@@ -1,8 +1,10 @@
 ---
-title: "Exploratory metabolomic/longitudinal analysis of white tea"
+title: "Metabolomics of white tea stored up to 11 years"
 author: "Josh Morimoto"
-date: "July 11, 2026"
+date: "July 15, 2026"
 output: html_fragment
+bibliography: references/references.bib
+csl: references/analytical-chemistry.csl
 ---
 
 ```{r, include=FALSE}
@@ -18,11 +20,15 @@ communicate with its environment, since it can't get up and walk away like an
 animal or even a microbe could. Evolution has driven myriad metabolic pathways
 to allow plants to defend themselves. This makes them particularly complex and
 challenging subjects of research, slowing studies on how crop qualities will
-change with the increasing threat of climate change.
+change under different conditions, and exacerbated with the increasing threat 
+and severity of climate change.
+
+In this study, I selected two metabolites that change strongly with storage
+time.  They correspond to the differential features 607.2477_411 and
+130.0507_69, named as _m/z_-RT pairs.
 
 For this demo/tutorial, I looked for data collected from _Camellia sinensis_
-samples on MetaboLights and found one study in progress by Wei and Li
-(https://www.ebi.ac.uk/metabolights/editor/MTBLS13336/overview).  This study
+samples on MetaboLights and found [one study in progress by Wei and Li](https://www.ebi.ac.uk/metabolights/editor/MTBLS13336/overview).  This study
 aimed to investigate the sensory and chemical metabolites, both endogenous to
 the tea and exogenous from microbial contributions, over long-term storage. We
 will focus on the metabolomics data herein.
@@ -30,14 +36,31 @@ will focus on the metabolomics data herein.
 ## IDE considerations
 I use VSCode with R and arf as the R frontend. Many people use RStudio or Python
 with marimo or Jupyter notebooks but this is what works best for me. I also
-manage R/Python environments with conda. For more info, follow Renkun Ken's blog
-on writing R in VScode:
-https://renkun.me/2019/12/11/writing-r-in-vscode-a-fresh-start/. He's my hero.
+manage R/Python environments with conda. For more info, follow [Renkun Ken's
+guide on writing R in
+VScode](https://renkun.me/2019/12/11/writing-r-in-vscode-a-fresh-start/).
 
 You'll also notice I don't really stick to the R style guidelines. I like my
 `=` signs more than typing out `<-` everytime because I learned on Python.
 It has never not worked for me. Conversely, I also like naming variables with
 `.` rather than snake_case or camelCase. It looks better to my eyeballs.
+
+The conda environment yml can be downloaded [here](https://raw.githubusercontent.com/jmorim/white_tea/refs/heads/master/environment.yml).
+
+I'm also including a couple of packages from github, namely my own `LCMStools`
+and Jan Stanstrup's `xcmsVis`. These should be installed with `pak` inside the
+R environment.
+
+Finally, there's a good chance if you don't know your environment very well,
+you'll end up crashing your R session consistently. Anecdotally, I found
+reducing the number of cores used for parallel processing leads to less memory
+consumption.  I'm on an Intel Core Ultra 5 245K with 14 cores, and 32 GB of DDR5
+RAM.  Setting the MulticoreParam to 4 cores worked well for me, but 6 cores was
+consistently too much for my memory. There's probably some way to lazy-load
+MsExperiment data, but we'll cover that another time.
+
+If you have problems, feel free to reach out at
+[morimoto@motoanalytical.com](mailto:morimoto@motoanalytical.com).
 
 ## Libraries
 ```{r}
@@ -50,12 +73,27 @@ library(curl)
 library(LCMStools)
 library(MsExperiment)
 library(BiocParallel)
+library(xcms)
+library(xcmsVis)
+library(plotly)
+library(htmlwidgets)
+library(colorspace)
+library(webchem)
+library(SummarizedExperiment)
+library(ropls)
+library(broom)
 
 if(.Platform$OS == 'Windows'){
-  register(bpstart(SnowParam(6, progressbar=FALSE)))
+  register(bpstart(SnowParam(4, progressbar=FALSE)))
 } else if(.Platform$OS == 'unix'){
-  register(bpstart(MulticoreParam(6, progressbar=FALSE)))
+  register(bpstart(MulticoreParam(4, progressbar=FALSE)))
 }
+```
+
+Github packages
+```{r, eval = FALSE}
+library(devtools)
+pak::pak('jmorim/LCMStools')
 ```
 
 For `httpgd` with VSCode and arf
@@ -91,6 +129,11 @@ backend, we could have loaded the *.mzML* files directly for analysis.
 ```{r}
 study.info = read.table(paste0(mtbls_ftp_path(mtbls.repo), grep('^a_', all.files, value = TRUE)),
     sep = '\t', header = TRUE, check.names = FALSE)
+
+# Can use this when MetaboLights is down if already downloaded, which happened in the middle of this
+#study.info = read.table(dir('.', pattern='^a\\_'),
+#    sep = '\t', header = TRUE, check.names = FALSE)
+
 study.info |> head()
 study.info[, c('Raw Spectral Data File', 'Derived Spectral Data File')] |> head()
 #specs = Spectra::Spectra('MTBLS13336', filePattern = '.raw', source = MsBackendMetaboLights())
@@ -153,14 +196,15 @@ if(length(study.info[, 'Raw Spectral Data File']) != length(dir('_raw'))){
 ```
 
 ## Data conversion
-To read files with `xcms`, data need to be converted to *.mzML*
-format with `MSConvert` from the `ProteoWizard` package. Since I'm on Linux,
-I need a docker container to run this with a Windows image. On Windows, it can
-run natively. The code below detects the host environment and chooses the appropriate
-conversion command. The `convertDtoMZML` function from my `LCMStools` package
-only works for Agilent *.d* files. Docker will prompt for a password for sudo
-access. By using the Docker image, you agree to certain vendor licenses for
-converting proprietary formats to *.mzML*.
+To read files with `xcms`, data need to be converted to *.mzML* format with
+`MSConvert` from the `ProteoWizard` package. Since I'm on Linux, I need a docker
+container to run this with a Windows image. On Windows, it can run natively. The
+code below detects the host environment and chooses the appropriate conversion
+command. The `convertDtoMZML` function from my `LCMStools` package was built for
+Agilent *.d* files, but it should work for *.raw* files too since the parameters
+aren't too specific. Docker will prompt for a password for sudo access. By using
+the Docker image, you agree to certain vendor licenses for converting
+proprietary formats to *.mzML*.
 
 ```{r}
 raw.files = dir('_raw', pattern = '\\.raw$', full.names = TRUE)
@@ -168,7 +212,7 @@ raw.files = dir('_raw', pattern = '\\.raw$', full.names = TRUE)
 # Check if length mzML files matches length raw files
 if(length(raw.files) > length(dir('_mzML', pattern = '\\.mzML$'))){
   if(.Platform$OS == 'Windows'){
-    d.files |> walk(convertDtoMZML, path.out = '_mzML')
+    raw.files |> walk(LCMStools::convertDtoMZML, path.out = '_mzML')
   } else if(.Platform$OS == 'unix'){
     walk(raw.files, ~ system(paste0(
       'sudo docker run -it --rm -v $PWD:/data proteowizard/pwiz-skyline-i-agree-to-the-vendor-licenses:latest wine msconvert /data/_raw/', basename(.), ' --filter "peakPicking true 1-" -o /data/_mzML --mzML'
@@ -181,45 +225,618 @@ mzml.files = dir('_mzML', pattern = '\\.mzML$', full.names = TRUE)
 ```
 
 ## Initial data inspection
-First we'll plot the positive and negative TICs to make sure there aren't any
-misbehaving data files or sample runs.
+First we'll plot the positive TIC to make sure there aren't any
+misbehaving data files or sample runs. In this case, I'm only going to
+focus on the positive data for now and leave the negative data as an exercise
+for the reader.
 
 ```{r}
 mzml.files |> head()
 pos.files = mzml.files[str_detect(mzml.files, 'POS')]
-pos.files
-neg.files = mzml.files[str_detect(mzml.files, 'NEG')]
 pos.data = readMsExperiment(pos.files)
-neg.data = readMsExperiment(neg.files)
 
 plot(chromatogram(pos.data), main = 'Positive TIC')
-
-plot(chromatogram(neg.data), main = 'Negative TIC')
 ```
 
 It looks like nothing disastrous happened in the data collection. From the TICs,
-it's hard to tell right away if there are any difference since the noise buries
+it's hard to tell right away if there are any differences since the noise buries
 most of the valuable data. Sometimes you can get away with focusing on a certain
 region that's obviously different.
 
 Looking closer, the polar region before 100 seconds in retention changes with
-intensity in both the positive and negative ionization modes. In the next part,
-we'll color code these TICs and actually do some peak picking on the _m/z_
-level.
+intensity. I can infer that these are polar compounds since the column used was
+a Waters Acquity bridged-ethylene hybrid (BEH) C18 column, which is reversed
+phase.  Polar compounds elute first, and nonpolar compounds elute later.
 
-## Stay tuned for Part 2.
-<!--
 ## Supplying readMsExperiment with metadata
 Now that we've taken a first look at the data, I'm going to go back and supply
 the `readMsExperiment` function with the relevant sampleData information so we
 can use it downstream for peak grouping and statistical analyses. The original
 MsExperiment objects will be replaced so they don't take up more memory.
 
-Coneveniently, we can build out sampleData from the assay data from MetaboLights.
-```{r}
+Conveniently, we can build out sampleData from the assay data from
+MetaboLights.  `dplyr` can filter the `study.info` table to split it into the
+positive and negative ion mode information, and `stringr` can extract the year
+value as a separate longitudinal variable. Sometimes, another package will
+override the `filter` function definition from `dplyr`, so it's good to scope it
+to the right one. The `study.info` table also has columns with duplicate names
+that need to be renamed or removed to work with `dplyr`.
 
+```{r}
+study.info |> head()
+study.info.m = study.info
+colnames(study.info.m) = make.unique(colnames(study.info.m))
+study.info.m = study.info.m |>
+  mutate(
+    polarity = str_extract(`Sample Name`, 'POS|NEG'),
+    year = str_extract(`Sample Name`, '\\_\\d+\\_') |> str_replace_all('\\_', '') |> as.numeric()
+  )
+pos.data = readMsExperiment(pos.files, 
+  sampleData = study.info.m |> filter(polarity == 'POS'))
 ```
--->
+
+##  Peak picking
+The next step is to get some starting parameters for peak picking. First, we'll
+zoom in on the early and late parts to refine the retention time window on which
+peak picking will operate. `xcmsVis` provides `ggplot` version of `xcms` plots,
+and `plotly` enables interactions, although it's slower than generating static
+plots, so I'm not going to incorporate it into my `knitr` output.
+
+```{r, eval=FALSE}
+gplot(chromatogram(pos.data)) |> ggplotly()
+```
+
+Zooming in, chromatographic peaks start eluting at 25 s, which is the dead time.
+This is the time it takes for unretained sample to pass through the column and
+reach the detector. It can be determined based on the column geometry and flow
+rate. For example, in this study, the authors used a 2.1 $\times$ 100 mm column
+with a 5 mm guard column (notice the discrepancy in the study.info and the
+Chromatography section of the protocol info), but didn't specify the flow rate.
+These columns are usually run at 0.1 -- 0.2 mL/min. Let's check using the
+observed dead time.  Column volume can be estimated, depending on the porosity,
+as $0.7 \times \pi r^2 L$, where $r$ is the column radius (half the column
+diameter noted above) and $L$ is the column length. Note this ignores any dead
+volume contributions from extra-column tubing.
+
+```{r}
+dead.time = 25
+col.vol = 0.7 * pi * (2.1/2)^2 * 105
+est.flow.rate = 60 * col.vol / dead.time
+print(est.flow.rate)
+```
+
+I was a bit off. It looks like they used a flow rate of 0.500 -- 0.600 mL/min,
+but that's not unheard of in ultra-high performance liquid chromatography (UHPLC).
+
+At the other end of the chromatograms, it looks like a diverter valve was used
+to redirect the stream when the gradient was done, and I don't see any artifacts,
+so the retention window for peak picking will be `c(25, 480)`. Since the same
+chromatographic method was used, this window should work for the negative mode
+data too.
+
+Before delving into peak picking, we need to set up colors for plotting. I use
+`colorspace` to generate my palettes. For longitudinal studies, a sequential
+palette is appropriate. Simple A versus B studies can use diverging palettes.
+```{r}
+year.levels = sort(unique(study.info.m$year))
+year.colors = sequential_hcl(length(year.levels), 'Viridis')
+names(year.colors) = sprintf('%02d', year.levels)
+
+# QC (NA year) gets its own neutral color appended separately, rather than
+# occupying a slot in the year gradient. 'NA' starts with a letter, so it
+# always alphabetically sorts after any 2-digit zero-padded number.
+year.colors['NA'] = '#7f7f7f'
+```
+
+Now to peak picking.
+
+Manually looking at the plotly TIC, the biggest peak (between 207 and 223 s,
+probably caffeine) had a peakwidth of about 16 seconds, so I'll round up to 20
+for the max peakwidth. A smaller peak had a peakwidth of around 8 seconds, so
+I'll round down to 5 for the min peakwidth.  The `ppm` parameter can usually be
+estimated by the instrument type. For TOFs and Q-TOFs, I've had to set this
+between 20 -- 80 ppm for good peak detection.  Orbitraps are much more accurate
+on the _m/z_ domain, so 10 ppm should be sufficient.
+
+The `snr` parameter won't be touched because it's shown to not be
+particularly useful here: https://link.springer.com/article/10.1186/s12859-023-05533-4.
+
+```{r}
+cwp = CentWaveParam(
+  ppm = 10,
+  peakwidth = c(5, 20)
+)
+
+peaks.pos = findChromPeaks(pos.data |> filterRt(c(25, 480)), param = cwp)
+
+dir.create('_rds', showWarnings = FALSE)
+saveRDS(peaks.pos, '_rds/peaks_pos.rds')
+```
+
+Since the biggest peak in tea is probably caffeine in positive mode, we'll use
+that to test how peak picking went. We can use `webchem` to look up the
+monoisotopic mass on PubChem, then calculate the theoretical _m/z_ for the
+[M+H]+ ion.
+
+```{r}
+caffeine.cid = webchem::get_cid('caffeine')
+caffeine.mass = webchem::pc_prop(caffeine.cid |> pull(cid), 'MonoisotopicMass')
+caffeine.mz = as.numeric(caffeine.mass$MonoisotopicMass) + 1.00728
+caffeine.mzr = LCMStools::calcPPM(caffeine.mz, 10)
+```
+
+Peak coloring can get tricky because the number of peaks often is greater than
+the number of chromatograms to draw, so there's some complicated subsetting
+required. I'll break it down as best as I can below.
+```{r}
+# We want to color the samples by how many years they were stored.
+sampleData(peaks.pos)$year
+# There are 22 samples in this set, with 7 different "year" conditions,
+# including NA for the QC's
+year.colors
+# This will build out a list of what color each sample will be based on year
+caffeine.colors =
+  year.colors[str_replace_na(sprintf('%02d',sampleData(peaks.pos)$year))]
+caffeine.colors
+
+# The peaks need to be filtered by the caffeine _m/z_, otherwise we'll be
+# getting back many more peaks from different ions
+chromPeaks(peaks.pos |>
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])))[,'sample']
+
+# Those peaks need to be mapped by which sample they are from to the
+# list of caffeine colors
+caffeine.colors[chromPeaks(peaks.pos |>
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])))[,'sample']]
+
+# For peak backgrounds, the hex color needs an alpha value appended to it
+# for transparency so it's easier to see overlaid peaks
+paste0(caffeine.colors[chromPeaks(peaks.pos |>
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])))[,'sample']], '10')
+
+# Sometimes I like to make this alpha value dynamic based on the number of
+# samples. Since there are 22, dividing by a total opacity (if everything's overlaid)
+# by number of samples, rounded down, yields 4% opacity. Since this is only 1
+# digit, it needs to be padded for the hex color string.
+caffeine.peakBg = paste0(
+  caffeine.colors[chromPeaks(peaks.pos |>
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])))[,'sample']], 
+  sprintf('%02d', floor(90 / length(caffeine.colors))))
+caffeine.peakBg
+
+# Ultimately, for coloring chromatograms and peaks, we end up with two lists:
+# one for the ion current line (caffeine.colors), and one for the integrated
+# peak background (caffeine.peakBg)
+
+peaks.pos |> 
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
+  chromatogram() |> 
+  plot(col = caffeine.colors, 
+    peakBg = caffeine.peakBg,
+    main = 'Caffeine peak results with initial cwp parameters')
+```
+
+The big split in the peak down the middle shows we need to refine these
+parameters more. The peakwidth minimum and maximum should be increased so
+there's no peak splitting. We can also check the mass accuracy drift from
+the theoretical caffeine _m/z_.
+
+```{r}
+chromPeaks(peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))) |>
+  as.data.frame() |>
+  mutate(
+    peakwidth = rtmax - rtmin,
+    mz.error = abs(mz - caffeine.mz),
+    ppm.error = 10^6 * (mz.error / caffeine.mz)
+  )
+
+peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
+  filterRt(c(200, 250)) |> plot(type='XIC')
+```
+
+From the table, we can narrow down the ppm threshold to 6 and adjust the
+peakwidth.
+
+```{r}
+cwp = CentWaveParam(
+  ppm = 6,
+  peakwidth = c(10, 30)
+)
+
+peaks.pos = findChromPeaks(pos.data |> filterRt(c(25, 480)), param = cwp)
+
+chromPeaks(peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))) |>
+  as.data.frame() |>
+  mutate(
+    peakwidth = rtmax - rtmin,
+    mz.error = abs(mz - caffeine.mz),
+    ppm.error = 10^6 * (mz.error / caffeine.mz)
+  )
+
+peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
+  filterRt(c(200, 250)) |> plot(type='XIC')
+
+par(mfrow=c(1,1))
+peaks.pos |> 
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
+  chromatogram() |> 
+  plot(col = caffeine.colors, 
+    peakBg = caffeine.peakBg)
+```
+
+This looks better, but the integration window looks problematic. Caffeine tends
+to tail in positive ESI mode for reasons unknown, and that tail isn't captured
+here. It's probably fine since it's consistent, but we can adjust `cwp` to fix
+it by changing the default parameter `integrate = 1` to `integrate = 2`.
+
+```{r}
+cwp = CentWaveParam(
+  ppm = 6,
+  peakwidth = c(10, 30),
+  integrate = 2
+)
+
+peaks.pos = findChromPeaks(pos.data |> filterRt(c(25, 480)), param = cwp)
+
+chromPeaks(peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))) |>
+  as.data.frame() |>
+  mutate(
+    peakwidth = rtmax - rtmin,
+    mz.error = abs(mz - caffeine.mz),
+    ppm.error = 10^6 * (mz.error / caffeine.mz)
+  )
+
+peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
+  filterRt(c(200, 250)) |> plot(type='XIC')
+
+par(mfrow=c(1,1))
+peaks.pos |> 
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
+  chromatogram() |> 
+  plot(col = caffeine.colors, 
+    peakBg = caffeine.peakBg)
+```
+
+This looks worse because it's not integrating the tail consistently. I'll settle
+on the previous parameters.
+
+```{r}
+cwp = CentWaveParam(
+  ppm = 6,
+  peakwidth = c(10, 30)
+)
+
+peaks.pos = findChromPeaks(pos.data |> filterRt(c(25, 480)), param = cwp)
+```
+
+Another good control for quality is to look at random peaks to see how those
+were treated.
+
+```{r}
+par(mfrow=c(3,3))
+
+set.seed(17)
+sample(seq_len(nrow(chromPeaks(peaks.pos))),9)
+chromPeaks(peaks.pos)[sample(seq_len(nrow(chromPeaks(peaks.pos))),9)[1],]
+sampleData(peaks.pos)[7,]
+
+year.colors
+sampleData(peaks.pos)$year
+
+sort(sampleData(peaks.pos)$year, na.last = TRUE)
+sample.colors = year.colors[str_replace_na(sprintf('%02d',sort(sampleData(peaks.pos)$year, na.last = TRUE)))]
+sample.colors
+
+set.seed(17)
+sample.colors[chromPeaks(peaks.pos)[sample(seq_len(nrow(chromPeaks(peaks.pos))),9)[1], 'sample']]
+sample.colors[chromPeaks(peaks.pos |>
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])))[,'sample']]
+
+par(mfrow=c(3,3))
+walk(sample(seq_len(nrow(chromPeaks(peaks.pos))), 9), ~ {
+
+  peak.info = chromPeaks(peaks.pos)[.x,]
+  test.colors = sample.colors[str_replace_na(sprintf('%02d', sampleData(peaks.pos)$year))]
+
+  # Since we filterFile() down to a single sample below, col/peakBg need to
+  # be a single color matching that one sample, not the full 22-sample
+  # vector (a length mismatch there makes xcms fall back to default gray).
+  peak.color = test.colors[peak.info['sample']]
+
+  peaks.pos |>
+    filterFile(peak.info['sample']) |>
+    filterRt(c(peak.info['rtmin'] - 30, peak.info['rtmax'] + 30)) |>
+    filterMz(c(peak.info['mzmin'], peak.info['mzmax'])) |>
+  chromatogram() |>
+  plot(col = peak.color, peakBg = paste0(peak.color, '70'))
+})
+```
+
+Most of these look reasonable compared to a perfect Gaussian peak. It's never
+going to be perfect with automated analysis. In the Kumler article, there are
+new metrics for peak quality that use a peak correlation metric and signal to
+noise estimate to filter out peaks, but I'll save those for another time.
+
+## Peak grouping/correspondence
+
+Each chromPeak is specific to a single sample. They need to be grouped across
+samples to compare. Tracking peaks across samples is called "correspondence" in
+`xcms`.
+
+Note, usually people perform retention time alignment before correspondence.
+In my opinion, if you need to align retention times, your chromatography is
+not robust enough and you're not generating good data. Sometimes this is the
+case when sequences don't use at least a few equlibration injections at the
+beginning. This particular study looks well-behaved.
+
+```{r}
+pdp = PeakDensityParam(
+  sampleGroups = sampleData(peaks.pos)$year,
+  minFraction = 0.5,
+  bw = 5
+)
+caffeine.peaks = peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))
+
+plotChromPeakDensity(chromatogram(caffeine.peaks), 
+  col = sample.colors, 
+  peakBg = paste0(sample.colors[chromPeaks(caffeine.peaks)[,'sample']], '05'), 
+  param =  pdp)
+```
+
+That example looks pretty good so we'll apply the same parameters to the full
+dataset.
+
+```{r}
+nrow(chromPeaks(peaks.pos))
+peaks.pos.grouped = groupChromPeaks(peaks.pos, param = pdp)
+nrow(featureDefinitions(peaks.pos.grouped))
+```
+
+We've now condensed the data from over 100,000 peaks to 5780 features, about
+18-fold, which makes sense since there are 22 samples. Let's plot some
+random features to see how well it worked.
+
+```{r}
+set.seed(17)
+rand.features = featureChromatograms(
+  peaks.pos.grouped, 
+  features = sample(seq_len(nrow(featureDefinitions(peaks.pos.grouped))), 9)
+)
+
+featureDefinitions(rand.features)
+featureValues(rand.features)
+
+par(mfrow=c(3,3))
+plot(rand.features, col = sample.colors,
+  peakBg = paste0(sample.colors[chromPeaks(rand.features)[,'sample']], '10'))
+```
+
+`xcms` might not have integrated some features, so we have to fill in missing
+peaks with "gap filling."
+
+```{r}
+peaks.pos.grouped.filled = fillChromPeaks(peaks.pos.grouped, param = ChromPeakAreaParam())
+
+rand.features.filled = featureChromatograms(
+  peaks.pos.grouped.filled,
+  features = rownames(featureDefinitions(rand.features))
+)
+featureValues(rand.features.filled[7,])
+plot(rand.features.filled,
+  col = sample.colors,
+  peakBg = paste0(sample.colors[chromPeaks(rand.features.filled)[,'sample']], '10'))
+saveRDS(peaks.pos.grouped.filled, '_rds/peaks_pos_grouped_filled.rds')
+```
+
+From the darker peak backgrounds, we can see that more peaks were integrated
+with this method. This helps prevent zero'd integrations from skewing the
+downstream analysis.
+
+## Using the final results
+
+We now basically have a table of feature intensities grouped across samples,
+which proxies for metabolite abundances. We can use this for downstream 
+statistical analyses to find what are the important features that change with
+storage time. This is a lot less work than trying to identify every single peak
+and then finding out most of them weren't important.
+
+I usually start with a principal component analysis (PCA) to get an overview
+of the data.
+
+```{r}
+pos.results = quantify(peaks.pos.grouped.filled, value = 'into', method = 'sum')
+# ropls's plot.opls() does as.vector(parAsColFcVn) then re-derives its own
+# factor internally, discarding any custom level order we set. So instead of
+# pre-building a factor, we pass a plain character vector whose labels are
+# zero-padded to match names(year.colors) exactly (see above) - that way
+# ropls's own alphabetical re-sort lands on the same order as year.colors.
+year.groups = ifelse(is.na(colData(pos.results)$year), 'NA',
+  sprintf('%02d', colData(pos.results)$year))
+
+pca.pos = opls(assay(pos.results, 'raw') |> t())
+plot(pca.pos, parPaletteVc = year.colors, parAsColFcVn = year.groups)
+```
+
+Nice. Each year condition clusters together, with the QC samples (prepared by
+mixing equal amounts of each sample) in the middle.  The first principal
+component explains 27% of the variance, with two features, FT4735 and FT5462,
+heavily loaded on opposite sides of the p1 loading plot.  On the score plot, we
+see short-term storage samples on the right and long-term storage samples on the
+left, suggesting a linear relationship between storage time and metabolite
+abundances.
+
+We can go back to the feature definitions table to identify the two
+standout features using `rowData()` from `SummarizedExperiment`.
+
+```{r}
+rowData(pos.results)[c('FT4735', 'FT5462'),]
+big.feature.chromatograms = featureChromatograms(peaks.pos.grouped.filled, features = c('FT4735', 'FT5462'))
+
+plot(big.feature.chromatograms,
+  col = sample.colors,
+  peakBg = paste0(sample.colors[chromPeaks(big.feature.chromatograms)[,'sample']], '10'))
+sample.colors
+sample.colors[1]
+sample.colors[22]
+chromPeaks(big.feature.chromatograms)[,'sample']
+```
+
+These features look pretty noisy and probably shouldn't be loaded so heavily.
+Let's try a different scaling method, pareto scaling, which is often used in
+biological data.
+
+```{r}
+pca.pos.pareto = opls(assay(pos.results, 'raw') |> t(), scaleC='pareto')
+plot(pca.pos.pareto, parPaletteVc = year.colors, parAsColFcVn = year.groups)
+```
+
+You can see that scaling has a big effect on the results. The first principal
+component now explains 41% of the variance, and we get more standout features.
+Let's see how those look.
+
+```{r}
+important.features = getLoadingMN(pca.pos.pareto) |> as.data.frame() |>
+  arrange(desc(abs(p1))) |>
+  dplyr::slice(1:9) |>
+  rownames()
+important.features
+
+important.feature.chromatograms = featureChromatograms(peaks.pos.grouped.filled,
+  features = important.features)
+
+plot(important.feature.chromatograms,
+  col = sample.colors,
+  peakBg = paste0(sample.colors[chromPeaks(important.feature.chromatograms)[,'sample']], '10'))
+```
+
+These look much more reasonable as important peaks, and we can clearly see
+differences in metabolite abundances when coloring by storage time. Some may be
+more noisy but some degree of false positives must be expected.
+
+Notice that some of the features are actually redundant, or degenerate, meaning
+they originate from the same compound or metabolite. In particular, the top left
+and middle feature show the distinct peak shape of isomers coeluting, and they
+elute at the same retention time. The middle right and bottom middle features also
+overlap. Another way to reduce the dataset is to group these degenerate features
+into compounds through the `CAMERA` package, which groups coeluting features into
+"pseudospectra." However, this package hasn't been updated to work with the
+new `xcms` interfaces introduced with version 3.0, so I haven't touched it in a while.
+Another, more recent, package is `MsFeatures` by Johannes Rainer. This one
+looks promising, and since it's so new I haven't gotten to implement it yet.
+But the ideas behind it sound strong, as it groups features by how well they
+correlate in the retention time dimension.
+
+I digress. My point is that a feature is not a compound, but once we get
+from features to compounds, data size can be reduced immensely.
+
+Since this is a longitudinal study, we can use `year` as the independent variable
+and feature intensities as dependent variables. We can use a linear model to see
+how the important features change with storage time.
+
+```{r}
+lm.results = map_dfr(important.features, ~ {
+  feature.intensities = assay(pos.results, 'raw')[.x,]
+  lm.fit = lm(feature.intensities ~ colData(pos.results)$year)
+  broom::tidy(lm.fit) |>
+    mutate(feature = .x) |>
+    mutate(
+      adj.r.squared = broom::glance(lm.fit)$adj.r.squared
+    )
+})
+
+lm.results
+
+important.features.high.r2 = lm.results |> filter(adj.r.squared > 0.7) |> pull(feature) |> unique()
+```
+
+This narrowed it down to two features with an adjusted R-squared greater than
+0.7, FT4766 and FT0396, or the plots corresponding to the 607.2477_411 _m/z_-RT
+and 130.0507_69 _m/z_-RT features above.
+
+Let's see how they quantitatively changed with storage time.
+
+```{r}
+map(important.features.high.r2, ~ {
+  feature.intensities = assay(pos.results, 'raw')[.x,]
+
+  plot.data = tibble(
+    feature = .x,
+    year = colData(pos.results)$year,
+    intensity = feature.intensities
+  )
+
+  ggplot(plot.data, aes(x = year, y = intensity)) +
+    geom_point() +
+    geom_boxplot(aes(group = factor(year))) +
+    geom_smooth(method = 'lm', color = 'red') +
+    labs(title = paste0('Feature ', .x, ' vs. Storage Time'),
+      x = 'Storage Time (years)',
+      y = 'Feature Intensity') +
+    theme_classic(base_size = 16)
+})
+```
+
+So now we can say something smart about how storage time affects the 
+metabolite abundances in white tea. Feature FT4766 decreases with storage time,
+while FT0396 increases, with p-values of 1.23e-6 and 8.50e-6, respectively.
+
+Quantitatively, FT0396 just about doubled over 11 years, and FT4766 decreased
+to about 20% of its original abundance. This is a pretty big change, and it would be
+interesting to see what these compounds are. We can try to identify them by
+looking up their _m/z_ values in metabolite databases.
+
+Looking up the _m/z_ from FT4766 across Phytohub, Massbank of Europe, and
+Massbank of North America, only Phytohub gave a potential match for ligstroside
+via an [M+2MeCN+H]+ adduct, while the other two yielded no results. We can check
+this to see if the protonated ion, [M+H]+, coincides with that feature.
+
+```{r}
+ligstroside.mzr = LCMStools::calcPPM(524.1894+1.00728, 100)
+featureDefinitions(peaks.pos.grouped.filled |> 
+  filterMz(c(ligstroside.mzr[1], ligstroside.mzr[2])))
+```
+
+The resulting two filtered features don't match the retention time
+of the ion, so this is likely something not in the databases.
+
+For FT0396, several matches were found in Phytohub as [M+2H] adducts. We can
+check if this makes sense by looking for an isotope peak at + 0.5 _m/z_ units
+away from 130.0507, corresponding to where the 1C13 isotope would be if doubly
+protonated.
+
+```{r}
+c13.mass.diff = 13.00335 - 12
+c13.mass.diff
+ft0396.mzr = LCMStools::calcPPM(
+  featureDefinitions(peaks.pos.grouped.filled)['FT0396', 'mzmed'] + c13.mass.diff/2, 100
+)
+
+featureDefinitions(peaks.pos.grouped.filled |>
+  filterMz(c(ft0396.mzr[1], ft0396.mzr[2])))
+```
+
+This also yielded no features, so it's likely a mismatch. Metabolite
+identification is a difficult problem, and these two compounds would likely need
+some structural information determined from MS/MS, or to be isolated with
+multidimensional chromatography or fractionating sample preparation, then
+analyzed by NMR to confirm their structures.
+
+There are many other ways to analyze this data, and that may be a topic for
+a future post. For now, this is a good starting point for exploring longitudinal
+metabolomics data.
+
+## Session Info
+```{r}
+sessionInfo()
+```
+
+## References
+@doi:10.1021/ac051437y
+@doi:10.1021/acs.analchem.5c04338
+
+The dataset is described in \cite{@mtbls13336}, using the repository infrastructure
+described by \cite{@yurekten2023}.
+
 _Raw LC-MS data used in this post is from the MetaboLights study MTBLS13336 Shu
 Ya Wei and Long Wen Li, available under [CC0 1.0
 Universal](https://creativecommons.org/publicdomain/zero/1.0/) at 
