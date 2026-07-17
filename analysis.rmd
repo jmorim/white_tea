@@ -1,17 +1,28 @@
 ---
 title: "Metabolomics of white tea stored up to 11 years"
 author: "Josh Morimoto"
-date: "July 15, 2026"
-output: html_fragment
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    self_contained: false
+    theme: null
+    highlight: null
+    toc: true
+    toc_depth: 2
 bibliography: references/references.bib
 csl: references/analytical-chemistry.csl
 ---
 
-```{r, include=FALSE}
-knitr::opts_chunk$set(message=FALSE, warning=FALSE)
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  message=FALSE, warning=FALSE, 
+  fig.align='center',
+  cache=TRUE)
+
+library(knitr)
+library(kableExtra)
 ```
 
-# Exploratory metabolomic/longitudinal analysis of white tea
 Tea is an important subject for me because it was the model crop on which my
 PhD thesis was based. At Tufts, we harvested tea grown in different seasons and
 elevations to see how its environment changed its flavor and health properties,
@@ -23,15 +34,16 @@ challenging subjects of research, slowing studies on how crop qualities will
 change under different conditions, and exacerbated with the increasing threat 
 and severity of climate change.
 
-In this study, I selected two metabolites that change strongly with storage
+In this study, I discovered that two metabolites change strongly with storage
 time.  They correspond to the differential features 607.2477_411 and
 130.0507_69, named as _m/z_-RT pairs.
 
 For this demo/tutorial, I looked for data collected from _Camellia sinensis_
-samples on MetaboLights and found [one study in progress by Wei and Li](https://www.ebi.ac.uk/metabolights/editor/MTBLS13336/overview).  This study
-aimed to investigate the sensory and chemical metabolites, both endogenous to
-the tea and exogenous from microbial contributions, over long-term storage. We
-will focus on the metabolomics data herein.
+samples on MetaboLights[@yurekten2023] and found 
+[one study in progress by Wei and Li](https://www.ebi.ac.uk/metabolights/editor/MTBLS13336/overview).  
+This study aimed to investigate the sensory and chemical metabolites, both
+endogenous to the tea and exogenous from microbial contributions, over long-term
+storage.[@mtbls13336] We will focus on the metabolomics data herein.
 
 ## IDE considerations
 I use VSCode with R and arf as the R frontend. Many people use RStudio or Python
@@ -94,6 +106,7 @@ Github packages
 ```{r, eval = FALSE}
 library(devtools)
 pak::pak('jmorim/LCMStools')
+pak::pak('jstanstrup/xcmsVis')
 ```
 
 For `httpgd` with VSCode and arf
@@ -118,13 +131,14 @@ all.files
 Raw data is stored under *FILES* and study metadata in various formats in the
 root directory.
 
-Below is the assay information table, also accessible online at
-https://www.ebi.ac.uk/metabolights/editor/MTBLS13336/assays.  This contains
-sample names, data file names, and some experimental parameters.  If the data
-were converted, we would also see a different file under the *Derived Spectral
-Data File* column, but the authors kept them in Thermo's proprietary .raw
-format. Otherwise, using the `Spectra` package and the `MsBackendMetaboLights`
-backend, we could have loaded the *.mzML* files directly for analysis.
+Below is the assay information table, also accessible online
+[here](https://www.ebi.ac.uk/metabolights/editor/MTBLS13336/assays).  This
+contains sample names, data file names, and some experimental parameters.  If
+the data were converted, we would also see a different file under the *Derived
+Spectral Data File* column, but the authors kept them in Thermo's proprietary
+.raw format. Otherwise, using the `Spectra` package and the
+`MsBackendMetaboLights` backend, we could have loaded the *.mzML* files directly
+for analysis.
 
 ```{r}
 study.info = read.table(paste0(mtbls_ftp_path(mtbls.repo), grep('^a_', all.files, value = TRUE)),
@@ -134,7 +148,7 @@ study.info = read.table(paste0(mtbls_ftp_path(mtbls.repo), grep('^a_', all.files
 #study.info = read.table(dir('.', pattern='^a\\_'),
 #    sep = '\t', header = TRUE, check.names = FALSE)
 
-study.info |> head()
+knitr::kable(study.info |> head()) |> kable_styling(full_width=TRUE) |> scroll_box(width='100%')
 study.info[, c('Raw Spectral Data File', 'Derived Spectral Data File')] |> head()
 #specs = Spectra::Spectra('MTBLS13336', filePattern = '.raw', source = MsBackendMetaboLights())
 ```
@@ -196,15 +210,16 @@ if(length(study.info[, 'Raw Spectral Data File']) != length(dir('_raw'))){
 ```
 
 ## Data conversion
-To read files with `xcms`, data need to be converted to *.mzML* format with
-`MSConvert` from the `ProteoWizard` package. Since I'm on Linux, I need a docker
-container to run this with a Windows image. On Windows, it can run natively. The
-code below detects the host environment and chooses the appropriate conversion
-command. The `convertDtoMZML` function from my `LCMStools` package was built for
-Agilent *.d* files, but it should work for *.raw* files too since the parameters
-aren't too specific. Docker will prompt for a password for sudo access. By using
-the Docker image, you agree to certain vendor licenses for converting
-proprietary formats to *.mzML*.
+To read files with
+`xcms`,[@doi:10.1021/ac051437y;@doi:10.1021/acs.analchem.5c04338] data need to be
+converted to *.mzML* format with `MSConvert` from the `ProteoWizard` package.
+Since I'm on Linux, I need a docker container to run this with a Windows image.
+On Windows, it can run natively. The code below detects the host environment and
+chooses the appropriate conversion command. The `convertDtoMZML` function from
+my `LCMStools` package was built for Agilent *.d* files, but it should work for
+*.raw* files too since the parameters aren't too specific. Docker will prompt
+for a password for sudo access. By using the Docker image, you agree to certain
+vendor licenses for converting proprietary formats to *.mzML*.
 
 ```{r}
 raw.files = dir('_raw', pattern = '\\.raw$', full.names = TRUE)
@@ -263,7 +278,6 @@ to the right one. The `study.info` table also has columns with duplicate names
 that need to be renamed or removed to work with `dplyr`.
 
 ```{r}
-study.info |> head()
 study.info.m = study.info
 colnames(study.info.m) = make.unique(colnames(study.info.m))
 study.info.m = study.info.m |>
@@ -289,14 +303,14 @@ gplot(chromatogram(pos.data)) |> ggplotly()
 Zooming in, chromatographic peaks start eluting at 25 s, which is the dead time.
 This is the time it takes for unretained sample to pass through the column and
 reach the detector. It can be determined based on the column geometry and flow
-rate. For example, in this study, the authors used a 2.1 $\times$ 100 mm column
+rate. For example, in this study, the authors used a 2.1 &times; 100 mm column
 with a 5 mm guard column (notice the discrepancy in the study.info and the
 Chromatography section of the protocol info), but didn't specify the flow rate.
 These columns are usually run at 0.1 -- 0.2 mL/min. Let's check using the
 observed dead time.  Column volume can be estimated, depending on the porosity,
-as $0.7 \times \pi r^2 L$, where $r$ is the column radius (half the column
-diameter noted above) and $L$ is the column length. Note this ignores any dead
-volume contributions from extra-column tubing.
+as 0.7 &times; &pi; r^2^ &times; L, in &mu;L, where r is the column radius (half
+the column diameter noted above) and L is the column length. Note this ignores
+any dead volume contributions from extra-column tubing.
 
 ```{r}
 dead.time = 25
@@ -339,7 +353,7 @@ between 20 -- 80 ppm for good peak detection.  Orbitraps are much more accurate
 on the _m/z_ domain, so 10 ppm should be sufficient.
 
 The `snr` parameter won't be touched because it's shown to not be
-particularly useful here: https://link.springer.com/article/10.1186/s12859-023-05533-4.
+particularly useful.[@kumler2023picky]
 
 ```{r}
 cwp = CentWaveParam(
@@ -422,15 +436,18 @@ there's no peak splitting. We can also check the mass accuracy drift from
 the theoretical caffeine _m/z_.
 
 ```{r}
-chromPeaks(peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))) |>
+knitr::kable(chromPeaks(peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))) |>
   as.data.frame() |>
   mutate(
     peakwidth = rtmax - rtmin,
     mz.error = abs(mz - caffeine.mz),
     ppm.error = 10^6 * (mz.error / caffeine.mz)
-  )
+  )) |> kable_styling(full_width=TRUE) |> scroll_box(width='100%')
 
-peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
+set.seed(17)
+peaks.pos |> 
+  filterFile(sample(seq_len(nrow(sampleData(peaks.pos))), 9)) |>
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
   filterRt(c(200, 250)) |> plot(type='XIC')
 ```
 
@@ -445,15 +462,18 @@ cwp = CentWaveParam(
 
 peaks.pos = findChromPeaks(pos.data |> filterRt(c(25, 480)), param = cwp)
 
-chromPeaks(peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))) |>
+knitr::kable(chromPeaks(peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))) |>
   as.data.frame() |>
   mutate(
     peakwidth = rtmax - rtmin,
     mz.error = abs(mz - caffeine.mz),
     ppm.error = 10^6 * (mz.error / caffeine.mz)
-  )
+  )) |> kable_styling(full_width=TRUE) |> scroll_box(width='100%')
 
-peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
+set.seed(17)
+peaks.pos |> 
+  filterFile(sample(seq_len(nrow(sampleData(peaks.pos))), 9)) |>
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
   filterRt(c(200, 250)) |> plot(type='XIC')
 
 par(mfrow=c(1,1))
@@ -478,15 +498,18 @@ cwp = CentWaveParam(
 
 peaks.pos = findChromPeaks(pos.data |> filterRt(c(25, 480)), param = cwp)
 
-chromPeaks(peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))) |>
+knitr::kable(chromPeaks(peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2]))) |>
   as.data.frame() |>
   mutate(
     peakwidth = rtmax - rtmin,
     mz.error = abs(mz - caffeine.mz),
     ppm.error = 10^6 * (mz.error / caffeine.mz)
-  )
+  )) |> kable_styling(full_width=TRUE) |> scroll_box(width='100%')
 
-peaks.pos |> filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
+set.seed(17)
+peaks.pos |> 
+  filterFile(sample(seq_len(nrow(sampleData(peaks.pos))), 9)) |>
+  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])) |>
   filterRt(c(200, 250)) |> plot(type='XIC')
 
 par(mfrow=c(1,1))
@@ -497,7 +520,7 @@ peaks.pos |>
     peakBg = caffeine.peakBg)
 ```
 
-This looks worse because it's not integrating the tail consistently. I'll settle
+This looks worse because it's not inaegrating the tail consistently. I'll settle
 on the previous parameters.
 
 ```{r}
@@ -513,34 +536,16 @@ Another good control for quality is to look at random peaks to see how those
 were treated.
 
 ```{r}
-par(mfrow=c(3,3))
-
-set.seed(17)
-sample(seq_len(nrow(chromPeaks(peaks.pos))),9)
-chromPeaks(peaks.pos)[sample(seq_len(nrow(chromPeaks(peaks.pos))),9)[1],]
-sampleData(peaks.pos)[7,]
-
-year.colors
-sampleData(peaks.pos)$year
-
-sort(sampleData(peaks.pos)$year, na.last = TRUE)
 sample.colors = year.colors[str_replace_na(sprintf('%02d',sort(sampleData(peaks.pos)$year, na.last = TRUE)))]
 sample.colors
 
 set.seed(17)
-sample.colors[chromPeaks(peaks.pos)[sample(seq_len(nrow(chromPeaks(peaks.pos))),9)[1], 'sample']]
-sample.colors[chromPeaks(peaks.pos |>
-  filterMz(c(caffeine.mzr[1], caffeine.mzr[2])))[,'sample']]
-
 par(mfrow=c(3,3))
 walk(sample(seq_len(nrow(chromPeaks(peaks.pos))), 9), ~ {
 
   peak.info = chromPeaks(peaks.pos)[.x,]
   test.colors = sample.colors[str_replace_na(sprintf('%02d', sampleData(peaks.pos)$year))]
 
-  # Since we filterFile() down to a single sample below, col/peakBg need to
-  # be a single color matching that one sample, not the full 22-sample
-  # vector (a length mismatch there makes xcms fall back to default gray).
   peak.color = test.colors[peak.info['sample']]
 
   peaks.pos |>
@@ -603,8 +608,10 @@ rand.features = featureChromatograms(
   features = sample(seq_len(nrow(featureDefinitions(peaks.pos.grouped))), 9)
 )
 
-featureDefinitions(rand.features)
-featureValues(rand.features)
+knitr::kable(featureDefinitions(rand.features)) |>
+  kable_styling(full_width=TRUE) |> scroll_box(width='100%')
+knitr::kable(featureValues(rand.features)) |>
+  kable_styling(full_width=TRUE) |> scroll_box(width='100%')
 
 par(mfrow=c(3,3))
 plot(rand.features, col = sample.colors,
@@ -621,7 +628,6 @@ rand.features.filled = featureChromatograms(
   peaks.pos.grouped.filled,
   features = rownames(featureDefinitions(rand.features))
 )
-featureValues(rand.features.filled[7,])
 plot(rand.features.filled,
   col = sample.colors,
   peakBg = paste0(sample.colors[chromPeaks(rand.features.filled)[,'sample']], '10'))
@@ -653,7 +659,7 @@ pos.results = quantify(peaks.pos.grouped.filled, value = 'into', method = 'sum')
 year.groups = ifelse(is.na(colData(pos.results)$year), 'NA',
   sprintf('%02d', colData(pos.results)$year))
 
-pca.pos = opls(assay(pos.results, 'raw') |> t())
+pca.pos = opls(assay(pos.results, 'raw') |> t(), fig.pdfC='none')
 plot(pca.pos, parPaletteVc = year.colors, parAsColFcVn = year.groups)
 ```
 
@@ -675,9 +681,6 @@ big.feature.chromatograms = featureChromatograms(peaks.pos.grouped.filled, featu
 plot(big.feature.chromatograms,
   col = sample.colors,
   peakBg = paste0(sample.colors[chromPeaks(big.feature.chromatograms)[,'sample']], '10'))
-sample.colors
-sample.colors[1]
-sample.colors[22]
 chromPeaks(big.feature.chromatograms)[,'sample']
 ```
 
@@ -686,7 +689,7 @@ Let's try a different scaling method, pareto scaling, which is often used in
 biological data.
 
 ```{r}
-pca.pos.pareto = opls(assay(pos.results, 'raw') |> t(), scaleC='pareto')
+pca.pos.pareto = opls(assay(pos.results, 'raw') |> t(), scaleC='pareto', fig.pdfC='none')
 plot(pca.pos.pareto, parPaletteVc = year.colors, parAsColFcVn = year.groups)
 ```
 
@@ -831,11 +834,6 @@ sessionInfo()
 ```
 
 ## References
-@doi:10.1021/ac051437y
-@doi:10.1021/acs.analchem.5c04338
-
-The dataset is described in \cite{@mtbls13336}, using the repository infrastructure
-described by \cite{@yurekten2023}.
 
 _Raw LC-MS data used in this post is from the MetaboLights study MTBLS13336 Shu
 Ya Wei and Long Wen Li, available under [CC0 1.0

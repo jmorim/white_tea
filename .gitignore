@@ -2,3 +2,6 @@ _mzML/*
 _raw/*
 .vscode/*
 _rds/*
+_noshare/*
+analysis_cache/*
+analysis_files/*
